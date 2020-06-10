@@ -3,6 +3,7 @@ package magic
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -25,17 +26,19 @@ var RequiredFields = [7]string{
 	"tid",
 }
 
-// Token struct holding the DIDToken string
+// Token struct holding the didToken string, the proof and the claim (once decoded)
 type Token struct {
-	DIDToken string
+	didToken string
+	proof    string
+	claim    map[string]interface{}
 }
 
 //New contructs a new token
-func New(DIDToken string) *Token {
-	return &Token{DIDToken: DIDToken}
+func New(didToken string) *Token {
+	return &Token{didToken: didToken}
 }
 
-func checkRequiredFields(claim map[string]interface{}) {
+func checkRequiredFields(claim map[string]interface{}) error {
 	var missingFields []string
 	for _, field := range RequiredFields {
 		if _, ok := claim[field]; !ok {
@@ -44,84 +47,76 @@ func checkRequiredFields(claim map[string]interface{}) {
 	}
 
 	if len(missingFields) > 0 {
-		panic(&DIDTokenError{
-			Message: fmt.Sprintf("DID token is missing required field(s): {%s}.", missingFields),
-			Err:     nil,
-		})
+		return fmt.Errorf("DID token is missing required field(s): {%s}", missingFields)
 	}
+	return nil
 }
 
 // Issuer Extracts the iss from the DID Token.
-func (t *Token) Issuer() string {
-	_, claim := t.Decode()
-	return claim["iss"].(string)
+func (t *Token) Issuer() (string, error) {
+	if t.claim == nil {
+		var err error
+		_, t.claim, err = t.Decode()
+		if err != nil {
+			return "", err
+		}
+	}
+	return t.claim["iss"].(string), nil
 }
 
-// PublicAddress public
-func (t *Token) PublicAddress() string {
-	iss := t.Issuer()
+// PublicAddress public address of the issuer
+func (t *Token) PublicAddress() (string, error) {
+	iss, err := t.Issuer()
+	if err != nil {
+		return "", err
+	}
 	siss := strings.Split(iss, ":")
 	if siss == nil || len(siss) < 3 {
-		panic(&DIDTokenError{
-			Message: fmt.Sprintf("Given issuer (%s) is malformed. Please make sure it follows the `did:method-name:method-specific-id` format.", iss),
-			Err:     nil,
-		})
+		return "", fmt.Errorf("Given issuer (%s) is malformed. Please make sure it follows the `did:method-name:method-specific-id` format", iss)
 	}
-	return strings.Split(iss, ":")[2]
+	return strings.Split(iss, ":")[2], nil
 }
 
-//Decode decode
-func (t *Token) Decode() (string, map[string]interface{}) {
-	decodedDIDToken, err := base64.StdEncoding.DecodeString(t.DIDToken)
+//Decode decode the didToken
+func (t *Token) Decode() (string, map[string]interface{}, error) {
+	decodedDIDToken, err := base64.StdEncoding.DecodeString(t.didToken)
 	if err != nil {
-		panic(&DIDTokenError{
-			Message: "DID token is malformed. It has to be a based64 encoded JSON serialized string.",
-			Err:     err,
-		})
+		return "", nil, errors.New("DID token is malformed. It has to be a based64 encoded JSON serialized string")
 	}
 
 	var jsonDIDToken []string
 	if err = json.Unmarshal(decodedDIDToken, &jsonDIDToken); err != nil {
-		panic(&DIDTokenError{
-			Message: "DID token is malformed. It has to be a based64 encoded JSON serialized string.",
-			Err:     err,
-		})
+		return "", nil, errors.New("DID token is malformed. It has to be a based64 encoded JSON serialized string")
 	}
 
 	if len(jsonDIDToken) != ExpectedDIDTokenContentLength {
-		panic(&DIDTokenError{
-			Message: "DID token is malformed. It has to have two parts [proof, claim].",
-			Err:     nil,
-		})
+		return "", nil, errors.New("DID token is malformed. It has to have two parts [proof, claim]")
 	}
 
 	proof := jsonDIDToken[0]
 
 	var claim map[string]interface{}
 	if err = json.Unmarshal([]byte(jsonDIDToken[1]), &claim); err != nil {
-		panic(&DIDTokenError{
-			Message: "DID token is malformed. Given claim should be a JSON serialized string.",
-			Err:     err,
-		})
+		return "", nil, errors.New("DID token is malformed. Given claim should be a JSON serialized string")
 	}
-	checkRequiredFields(claim)
-	return proof, claim
+	err = checkRequiredFields(claim)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return proof, claim, nil
 }
 
 // Validate validate
-func (t *Token) Validate(DIDToken string) {
-	proof, claim := t.Decode()
-	msg, err := json.Marshal(claim)
+func (t *Token) Validate() error {
+	_, claim, err := t.Decode()
+	_, err = json.Marshal(claim)
 	if err != nil {
-		panic(&DIDTokenError{
-			Message: "",
-			Err:     err,
-		})
+		return err
 	}
 
 	/*
 		signature := proof[:len(proof)-1] // remove recovery id
-
 		var recoveredAddress []byte
 		_ = crypto.VerifySignature(recoveredAddress, msg, []byte(signature)) // Ignoring this until I figure out how to do it
 
@@ -136,16 +131,11 @@ func (t *Token) Validate(DIDToken string) {
 	currentTime := time.Now().Unix()
 
 	if currentTime > int64(claim["ext"].(float64)) {
-		panic(&DIDTokenError{
-			Message: "Given DID token has expired. Please generate a new one.",
-			Err:     nil,
-		})
+		return fmt.Errorf("Given DID token has expired. Please generate a new one")
 	}
 
 	if currentTime < (int64(claim["nbf"].(float64)) - DIDTokenNBFGracePeriod) {
-		panic(&DIDTokenError{
-			Message: "Given DID token cannot be used at this time. Please check the 'nbf' field and regenerate a new token with a suitable value",
-			Err:     nil,
-		})
+		return fmt.Errorf("Given DID token cannot be used at this time. Please check the 'nbf' field and regenerate a new token with a suitable value")
 	}
+	return nil
 }

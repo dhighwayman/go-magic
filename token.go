@@ -34,8 +34,14 @@ type Token struct {
 }
 
 //New contructs a new token
-func New(didToken string) *Token {
-	return &Token{didToken: didToken}
+func New(didToken string) (*Token, error) {
+	token := &Token{didToken: didToken}
+	var err error
+	token.proof, token.claim, err = token.Decode()
+	if err != nil {
+		return nil, err
+	}
+	return token, nil
 }
 
 func checkRequiredFields(claim map[string]interface{}) error {
@@ -53,23 +59,13 @@ func checkRequiredFields(claim map[string]interface{}) error {
 }
 
 // Issuer Extracts the iss from the DID Token.
-func (t *Token) Issuer() (string, error) {
-	if t.claim == nil {
-		var err error
-		_, t.claim, err = t.Decode()
-		if err != nil {
-			return "", err
-		}
-	}
-	return t.claim["iss"].(string), nil
+func (t *Token) Issuer() string {
+	return t.claim["iss"].(string)
 }
 
 // PublicAddress public address of the issuer
 func (t *Token) PublicAddress() (string, error) {
-	iss, err := t.Issuer()
-	if err != nil {
-		return "", err
-	}
+	iss := t.Issuer()
 	siss := strings.Split(iss, ":")
 	if siss == nil || len(siss) < 3 {
 		return "", fmt.Errorf("Given issuer (%s) is malformed. Please make sure it follows the `did:method-name:method-specific-id` format", iss)
@@ -109,32 +105,28 @@ func (t *Token) Decode() (string, map[string]interface{}, error) {
 
 // Validate validate
 func (t *Token) Validate() error {
-	_, claim, err := t.Decode()
-	_, err = json.Marshal(claim)
+	_, err := json.Marshal(t.claim)
 	if err != nil {
 		return err
 	}
 
 	/*
-		signature := proof[:len(proof)-1] // remove recovery id
+		signature := t.proof[:len(t.proof)-1] // remove recovery id
 		var recoveredAddress []byte
 		_ = crypto.VerifySignature(recoveredAddress, msg, []byte(signature)) // Ignoring this until I figure out how to do it
 
 		if false && (string(recoveredAddress) != t.PublicAddress()) {
-			panic(&DIDTokenError{
-				Message: "Signature mismatch between 'proof' and 'claim'. Please generate a new token with an intended issuer.",
-				Err:     nil,
-			})
+			return fmt.Errorf"Signature mismatch between 'proof' and 'claim'. Please generate a new token with an intended issuer")
 		}
 	*/
 
 	currentTime := time.Now().Unix()
 
-	if currentTime > int64(claim["ext"].(float64)) {
+	if currentTime > int64(t.claim["ext"].(float64)) {
 		return fmt.Errorf("Given DID token has expired. Please generate a new one")
 	}
 
-	if currentTime < (int64(claim["nbf"].(float64)) - DIDTokenNBFGracePeriod) {
+	if currentTime < (int64(t.claim["nbf"].(float64)) - DIDTokenNBFGracePeriod) {
 		return fmt.Errorf("Given DID token cannot be used at this time. Please check the 'nbf' field and regenerate a new token with a suitable value")
 	}
 	return nil
